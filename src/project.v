@@ -69,7 +69,7 @@ module tt_um_vinayaka_pqc_ntt (
   // ---------------------------------------------------------------------
   function automatic [1:0] mod3f;
     input [25:0] v;
-    reg [6:0] a1, a2, a3, a4, a5;
+    reg [6:0] a1, a2, a3, a4;
     begin
       a1 = {5'b0, v[ 1: 0]} + {5'b0, v[ 3: 2]} + {5'b0, v[ 5: 4]} +
            {5'b0, v[ 7: 6]} + {5'b0, v[ 9: 8]} + {5'b0, v[11:10]} +
@@ -79,8 +79,8 @@ module tt_um_vinayaka_pqc_ntt (
       a2 = {2'b0, a1[6:2]} + {5'b0, a1[1:0]};
       a3 = {2'b0, a2[6:2]} + {5'b0, a2[1:0]};
       a4 = {2'b0, a3[6:2]} + {5'b0, a3[1:0]};
-      a5 = (a4 >= 7'd3) ? (a4 - 7'd3) : a4;
-      mod3f = a5[1:0];
+      // a4 <= 4 here, so one conditional subtract lands in 0..2.
+      mod3f = (a4 >= 7'd3) ? (a4[1:0] - 2'd3) : a4[1:0];
     end
   endfunction
 
@@ -141,16 +141,26 @@ module tt_um_vinayaka_pqc_ntt (
 
   // ---------------------------------------------------------------------
   // Shared modular add / subtract.  X is always `areg`; only port Y is
-  // multiplexed.  Reduction is one conditional subtraction, decided by the
-  // subtractor's own borrow bit rather than a separate comparator.
+  // multiplexed.
+  //
+  // The add and subtract paths are computed in parallel and selected at the
+  // end, so the critical path is two adder levels rather than three.  The
+  // subtract path exploits the fact that a - y + q lands in [0, 2q) and the
+  // decision to add q back is exactly the sign of a - y, which the first
+  // subtractor's own borrow bit already carries.
   // ---------------------------------------------------------------------
   wire        do_sub = (state == S_PSUB) || (state == S_POSUB);
   wire [22:0] ymux   = ((state == S_POADD) || (state == S_POSUB)) ? acc : breg;
 
-  wire [24:0] apre = do_sub ? ({2'b0, areg} - {2'b0, ymux} + {2'b0, q})
-                            : ({2'b0, areg} + {2'b0, ymux});
-  wire [25:0] adq    = {1'b0, apre} - {3'b0, q};
-  wire [22:0] as_out = ~adq[25] ? adq[22:0] : apre[22:0];
+  wire [23:0] as_add  = {1'b0, areg} + {1'b0, ymux};      // < 2q
+  wire [24:0] as_addq = {1'b0, as_add} - {2'b0, q};
+  wire [22:0] add_out = ~as_addq[24] ? as_addq[22:0] : as_add[22:0];
+
+  wire [23:0] as_sub  = {1'b0, areg} - {1'b0, ymux};      // signed in 24 bits
+  wire [23:0] as_subq = as_sub + {1'b0, q};
+  wire [22:0] sub_out = as_sub[23] ? as_subq[22:0] : as_sub[22:0];
+
+  wire [22:0] as_out  = do_sub ? sub_out : add_out;
 
   // ---------------------------------------------------------------------
   // Serial multiply-and-reduce.  acc < q on entry, so
@@ -334,7 +344,7 @@ module tt_um_vinayaka_pqc_ntt (
   assign uio_oe  = 8'b1100_0000;   // uio[7:6] outputs, uio[5:0] inputs
 
   wire _unused = &{ena, uio_in[7:6],
-                   apre[24:23], adq[24:23],
+                   as_addq[23], as_subq[23],
                    tsum[24:23], dq1[24:23], dq2[24:23], 1'b0};
 
 endmodule
