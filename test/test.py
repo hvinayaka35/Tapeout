@@ -144,9 +144,13 @@ async def test_random(dut):
 async def test_twiddle_recurrence(dut):
     """zeta should advance by zstep after each butterfly."""
     cocotb.start_soon(Clock(dut.clk, 20, units="ns").start())
-    await reset(dut)
 
     for scheme, (q, _, name) in SCHEMES.items():
+        # Reset per scheme: the write pointer auto-increments and is only
+        # rewound by START or reset, so a partial 6-byte write at the end of
+        # the previous scheme would otherwise leave it at offset 6.
+        await reset(dut)
+
         zeta, zstep = 17 % q, 5 % q
         base = ctrl(0, scheme)
         dut.uio_in.value = base
@@ -159,12 +163,19 @@ async def test_twiddle_recurrence(dut):
                 if not (int(dut.uio_out.value) >> BUSY_BIT) & 1:
                     break
                 await ClockCycles(dut.clk, 1)
+            else:
+                raise AssertionError(f"{name} step {step}: never left busy")
             out0, out1 = await read_result(dut, base)
             # CT with a = b = 1: out0 = 1 + zeta, out1 = 1 - zeta
-            assert out0 == (1 + zeta) % q, f"{name} step {step}: out0"
-            assert out1 == (1 - zeta) % q, f"{name} step {step}: out1"
+            assert out0 == (1 + zeta) % q, (
+                f"{name} step {step}: out0 got {out0} expected {(1 + zeta) % q}"
+            )
+            assert out1 == (1 - zeta) % q, (
+                f"{name} step {step}: out1 got {out1} expected {(1 - zeta) % q}"
+            )
             zeta = (zeta * zstep) % q
-            # only a and b need rewriting; zeta is now generated on-chip
+            # START rewound the write pointer, so only a and b need rewriting;
+            # zeta is now maintained on-chip by the recurrence.
             await write_bytes(dut, [1, 1], base)
         dut._log.info(f"{name} twiddle recurrence: OK")
 
